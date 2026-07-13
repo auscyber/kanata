@@ -1,0 +1,67 @@
+;; Examples of `deftemplate` and `template-expand` usages.
+;; Run these through the kanata parser to observe how templates are expanded
+;; at parse time.
+
+;; 1) Simple substitution
+(deftemplate greet (name)
+  (message "Hello," $name "!"))
+
+;; Use:
+(template-expand greet "Alice")
+;; -> expands to: (message "Hello," "Alice" "!")
+
+;; 2) Multiple parameters and lists
+(deftemplate make-layer (layername keys)
+  (deflayer $layername
+    $keys))
+
+;; Use with atoms as substitutions (unquoted are atoms):
+(template-expand make-layer numbers ( 1 2 3 4 ))
+;; -> expands to: (deflayer numbers (1 2 3 4))
+
+;; 3) Nested template usage (one template expands another).
+(deftemplate base-var (k v)
+  (defvar $k $v))
+
+(deftemplate wrapper (k v)
+  (template-expand base-var $k $v)
+  (comment "wrapped"))
+
+;; Use:
+(template-expand wrapper tap-timeout 150)
+;; -> expands to:
+;; (defvar tap-timeout 150)
+;; (comment "wrapped")
+
+;; 4) Conditional expansion inside templates using `if-equal` / `if-not-equal`
+(deftemplate feature-toggle (flag)
+  (if-equal $flag "on"
+    (defvar feature-enabled yes)
+    (defvar feature-enabled no)))
+
+(template-expand feature-toggle "on")
+;; -> (defvar feature-enabled yes)
+
+(template-expand feature-toggle "off")
+;; -> (defvar feature-enabled no)
+
+;; 5) `if-in-list` example
+(deftemplate choose-action (key)
+  (if-in-list $key (a b c)
+    (defalias act (tap-vkey $key))
+    (defalias act (noop))))
+
+(template-expand choose-action a)
+;; -> defines `act` as (tap-vkey a)
+
+;; 6) Shorthand `t!` for `template-expand` (identical semantics)
+(deftemplate say (who what)
+  (message $what "to" $who))
+
+(t! say "world" "hello")
+;; -> (message "hello" "to" "world")
+
+;; 7) Warning example: variable declared but not used
+(deftemplate unused-var (x y)
+  (message $x))
+;; Parser will emit a warning that `$y` did not appear in its template.

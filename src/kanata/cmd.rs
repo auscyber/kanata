@@ -112,6 +112,10 @@ fn parse_items<'a>(exprs: &'a [SExpr], items: &mut Vec<Item>) -> &'a [SExpr] {
             }
             &exprs[1..]
         }
+        SExpr::DocString(_) => {
+            log::warn!("{LP} found a docstring in a cmd - ignoring it");
+            &exprs[1..]
+        }
     }
 }
 
@@ -168,6 +172,10 @@ fn try_parse_chorded_list<'a>(
     match &exprs[0] {
         SExpr::Atom(osc) => {
             log::warn!("{LP} expected list after {chord}, got string {}", &osc.t);
+            exprs
+        }
+        SExpr::DocString(_) => {
+            log::warn!("{LP} expected list after {chord}, got docstring");
             exprs
         }
         SExpr::List(subexprs) => {

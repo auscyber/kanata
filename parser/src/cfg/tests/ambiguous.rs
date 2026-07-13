@@ -14,6 +14,7 @@ fn parse_double_dollar_var() {
     parse_cfg(source)
         .map_err(|e| eprintln!("{:?}", miette::Error::from(e)))
         .expect("parses");
+    
 }
 
 #[test]
@@ -29,4 +30,5 @@ fn parse_double_at_alias() {
     parse_cfg(source)
         .map_err(|e| eprintln!("{:?}", miette::Error::from(e)))
         .expect("parses");
+    
 }

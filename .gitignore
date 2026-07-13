@@ -8,3 +8,4 @@ PLAN.md
 test_*.kbd
 manual_test/
 *.test.kbd
+.direnv

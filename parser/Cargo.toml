@@ -24,6 +24,8 @@ rustc-hash = "1.1.0"
 thiserror = "1.0.38"
 
 kanata-keyberon = { path = "../keyberon", version = "0.1100.0" }
+tree-sitter = { version = "0.26.8", optional = true }
+tree-sitter-kanata = { version = "0.1.0", path = "../tree-sitter-kanata" }
 
 [dev-dependencies]
 simplelog = "0.12.0"
@@ -36,3 +38,4 @@ lsp = []
 win_llhook_read_scancodes = []
 win_sendinput_send_scancodes = []
 zippychord = []
+treesitter = ["dep:tree-sitter"]

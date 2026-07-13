@@ -276,7 +276,15 @@ pub struct Cfg {
     pub switch_max_key_timing: u16,
     /// Zipchord-like configuration.
     pub zippy: Option<(ZchPossibleChords, ZchConfig)>,
+    /// Documentation string for individual key positions, keyed by `(layer_index, key_column)`.
+    /// Sourced from `defalias`/`deftemplate` docstrings; overrides the auto-generated keymap
+    /// description so tooling (e.g. a which-key overlay) can show authored docs.
+    pub key_docs: KeyDocs,
 }
+
+/// Per-key-position documentation, keyed by `(layer_index, key_column)` where `key_column` is the
+/// `OsCode` numeric value. Populated from `defalias`/`deftemplate` docstrings.
+pub type KeyDocs = HashMap<(usize, usize), String>;
 
 /// Parse a new configuration from a file.
 pub fn new_from_file(p: &Path) -> MResult<Cfg> {
@@ -333,6 +341,7 @@ pub fn new_from_str(cfg_text: &str, file_content: HashMap<String, String>) -> MR
         fake_keys,
         switch_max_key_timing,
         zippy: icfg.zippy,
+        key_docs: icfg.key_docs,
     })
 }
 
@@ -385,6 +394,7 @@ fn parse_cfg(p: &Path) -> MResult<Cfg> {
         fake_keys,
         switch_max_key_timing,
         zippy: icfg.zippy,
+        key_docs: icfg.key_docs,
     })
 }
 
@@ -426,6 +436,7 @@ pub struct IntermediateCfg {
     pub chords_v2: Option<ChordsV2<'static, KanataCustom>>,
     pub start_action: Option<&'static KanataAction>,
     pub zippy: Option<(ZchPossibleChords, ZchConfig)>,
+    pub key_docs: KeyDocs,
 }
 
 // A snapshot of enviroment variables, or an error message with an explanation
@@ -511,6 +522,9 @@ fn expand_includes(
                 SExpr::List(_) => {
                     bail_expr!(expr, "Filepath cannot be a list")
                 }
+                SExpr::DocString(_) => {
+                    bail_expr!(expr, "Filepath cannot be a docstring")
+                }
             };
 
             if let Some(expr) = exprs.next() {
@@ -563,13 +577,21 @@ pub fn parse_cfg_raw_string(
 ) -> Result<IntermediateCfg> {
     let mut lsp_hints: LspHints = Default::default();
 
-    let spanned_root_exprs = sexpr::parse(text, &cfg_path.to_string_lossy())
+    let (spanned_root_exprs, template_docs) = sexpr::parse(text, &cfg_path.to_string_lossy())
         .and_then(|xs| expand_includes(xs, file_content_provider, &mut lsp_hints))
         .and_then(|xs| {
             filter_platform_specific_cfg(xs, def_local_keys_variant_to_apply, &mut lsp_hints)
         })
         .and_then(|xs| filter_env_specific_cfg(xs, &env_vars, &mut lsp_hints))
         .and_then(|xs| expand_templates(xs, &mut lsp_hints))?;
+
+    // Retain documented templates so expanded actions can be attributed back to them when
+    // building per-key documentation for the keymap. This is assigned onto `s` after `s` is
+    // reconstructed further below (the reconstruction would otherwise clear it).
+    let documented_templates: Vec<TemplateDoc> = template_docs
+        .into_iter()
+        .filter(|t| t.documentation.is_some())
+        .collect();
 
     if let Some(spanned) = spanned_root_exprs
         .iter()
@@ -786,6 +808,7 @@ pub fn parse_cfg_raw_string(
         block_unmapped_keys: cfg.block_unmapped_keys,
         lsp_hints: RefCell::new(lsp_hints),
         vars,
+        template_docs: documented_templates,
         ..Default::default()
     };
 
@@ -827,7 +850,8 @@ pub fn parse_cfg_raw_string(
         bail!("alias-to-trigger-on-load was given, but alias could not be found")
     }
 
-    let mut klayers = parse_layers(s, &mut mapped_keys, &cfg)?;
+    let mut key_docs: KeyDocs = KeyDocs::default();
+    let mut klayers = parse_layers(s, &mut mapped_keys, &cfg, &mut key_docs)?;
 
     resolve_chord_groups(&mut klayers, s)?;
     let layers = s.a.bref_slice(klayers);
@@ -954,6 +978,7 @@ pub fn parse_cfg_raw_string(
         chords_v2,
         start_action,
         zippy,
+        key_docs,
     })
 }
 
@@ -1360,6 +1385,12 @@ pub struct ParserState {
     switch_max_key_timing: Cell<u16>,
     multi_action_nest_count: Cell<u16>,
     pctx: ParserContext,
+    /// Documentation for each `deftemplate`, used to attribute expanded actions back to the
+    /// template they came from (via span containment) when building per-key documentation.
+    template_docs: Vec<TemplateDoc>,
+    /// Effective documentation for each alias name: the explicit docstring written in `defalias`
+    /// if present, otherwise a doc derived from the alias's action (e.g. a templated body).
+    alias_docs: HashMap<String, String>,
     pub lsp_hints: RefCell<LspHints>,
     a: Arc<Allocations>,
 }
@@ -1390,6 +1421,8 @@ impl Default for ParserState {
             block_unmapped_keys: default_cfg.block_unmapped_keys,
             switch_max_key_timing: Cell::new(0),
             multi_action_nest_count: Cell::new(0),
+            template_docs: Default::default(),
+            alias_docs: Default::default(),
             lsp_hints: Default::default(),
             a: unsafe { Allocations::new() },
             pctx: ParserContext::default(),
@@ -1421,6 +1454,9 @@ fn parse_vars(exprs: &[&Vec<SExpr>], _lsp_hints: &mut LspHints) -> Result<HashMa
                 Some(v) => match v {
                     SExpr::Atom(_) => v.clone(),
                     SExpr::List(l) => parse_list_var(l, &vars),
+                    SExpr::DocString(_) => {
+                        bail_expr!(v, "variable value must not be a docstring")
+                    }
                 },
                 None => bail_expr!(var_name_expr, "variable name must have a subsequent value"),
             };
@@ -1568,10 +1604,11 @@ fn handle_envcond_defalias(
 }
 
 fn read_alias_name_action_pairs<'a>(
-    mut exprs: impl Iterator<Item = &'a SExpr>,
+    exprs: impl Iterator<Item = &'a SExpr>,
     s: &mut ParserState,
 ) -> Result<()> {
     // Read k-v pairs from the configuration
+    let mut exprs = exprs.peekable();
     while let Some(alias_expr) = exprs.next() {
         let alias = match alias_expr {
             SExpr::Atom(a) => &a.t,
@@ -1581,13 +1618,27 @@ fn read_alias_name_action_pairs<'a>(
                 alias_expr
             ),
         };
-        let action = match exprs.next() {
+        let action_expr = match exprs.next() {
             Some(v) => v,
             None => bail_expr!(alias_expr, "Found alias without an action - add an action"),
         };
-        let action = parse_action(action, s)?;
+        let action = parse_action(action_expr, s)?;
+        // An optional docstring may follow the action to document this alias, e.g.
+        // `(defalias terminal (cmd ghostty) #'Launch the terminal')`.
+        let explicit_doc = match exprs.peek() {
+            Some(SExpr::DocString(_)) => exprs
+                .next()
+                .and_then(|d| d.docstring(None))
+                .map(|d| d.to_string()),
+            _ => None,
+        };
+        // Otherwise derive documentation from the action itself (e.g. a templated body).
+        let doc = explicit_doc.or_else(|| compute_action_doc(action_expr, s));
         if s.aliases.insert(alias.into(), action).is_some() {
             bail_expr!(alias_expr, "Duplicate alias: {}", alias);
+        }
+        if let Some(doc) = doc {
+            s.alias_docs.insert(alias.into(), doc);
         }
         #[cfg(feature = "lsp")]
         s.lsp_hints
@@ -1597,6 +1648,54 @@ fn read_alias_name_action_pairs<'a>(
             .insert(alias.into(), alias_expr.span());
     }
     Ok(())
+}
+
+/// Compute a documentation string for an action expression, if any authored documentation applies.
+///
+/// Resolution, in order of precedence:
+/// 1. A reference to an alias (`@name`) yields that alias's effective documentation.
+/// 2. An action whose span falls within a documented `deftemplate` yields that template's
+///    docstring (expanded actions keep the spans of the template body).
+/// 3. A composite action (list) composes the distinct documentation of its children, so a
+///    `switch`/`macro`/`multi` built from documented pieces is documented algebraically.
+fn compute_action_doc(expr: &SExpr, s: &ParserState) -> Option<String> {
+    if let Some(atom) = expr.atom(s.vars()) {
+        if let Some(name) = atom.strip_prefix('@') {
+            return s.alias_docs.get(name).cloned();
+        }
+    }
+    if let Some(doc) = template_doc_for_span(&expr.span(), s) {
+        return Some(doc);
+    }
+    if let Some(list) = expr.list(s.vars()) {
+        let mut docs: Vec<String> = vec![];
+        for child in list {
+            if let Some(d) = compute_action_doc(child, s) {
+                if !docs.contains(&d) {
+                    docs.push(d);
+                }
+            }
+        }
+        if !docs.is_empty() {
+            return Some(docs.join("; "));
+        }
+    }
+    None
+}
+
+/// Find the docstring of the innermost documented `deftemplate` whose definition span contains
+/// `span`. Expanded template content keeps the spans of the template body, so this attributes an
+/// expanded action back to the template it came from.
+fn template_doc_for_span(span: &Span, s: &ParserState) -> Option<String> {
+    s.template_docs
+        .iter()
+        .filter(|t| {
+            t.def_span.file_name == span.file_name
+                && t.def_span.start.absolute <= span.start.absolute
+                && span.end.absolute <= t.def_span.end.absolute
+        })
+        .min_by_key(|t| t.def_span.end.absolute - t.def_span.start.absolute)
+        .and_then(|t| t.documentation.clone())
 }
 
 /// Parse a `kanata_keyberon::action::Action` from a `SExpr`.
@@ -1945,7 +2044,7 @@ fn set_layer_change_lsp_hint(layer_name_expr: &SExpr, lsp_hints: &mut LspHints) 
     {
         let layer_name_atom = match layer_name_expr {
             SExpr::Atom(x) => x,
-            SExpr::List(_) => unreachable!("checked in layer_idx"),
+            SExpr::List(_) | SExpr::DocString(_) => unreachable!("checked in layer_idx"),
         };
         lsp_hints
             .reference_locations
@@ -3445,6 +3544,9 @@ fn parse_live_reload_file(ac_params: &[SExpr], s: &ParserState) -> Result<&'stat
         SExpr::List(_) => {
             bail_expr!(&expr, "Filepath cannot be a list")
         }
+        SExpr::DocString(_) => {
+            bail_expr!(&expr, "Filepath cannot be a docstring")
+        }
     };
     let lrld_file_path = spanned_filepath.t.trim_atom_quotes();
     Ok(s.a.sref(Action::Custom(s.a.sref(s.a.sref_slice(
@@ -3462,6 +3564,9 @@ fn parse_clipboard_set(ac_params: &[SExpr], s: &ParserState) -> Result<&'static 
         SExpr::Atom(filepath) => filepath,
         SExpr::List(_) => {
             bail_expr!(&expr, "Clipboard string cannot be a list")
+        }
+        SExpr::DocString(_) => {
+            bail_expr!(&expr, "Clipboard string cannot be a docstring")
         }
     };
     let clip_string = clip_string.t.trim_atom_quotes();
@@ -3526,6 +3631,7 @@ fn parse_layers(
     s: &ParserState,
     mapped_keys: &mut MappedKeys,
     defcfg: &CfgOptions,
+    key_docs: &mut KeyDocs,
 ) -> Result<IntermediateLayers> {
     let mut layers_cfg = new_layers(s.layer_exprs.len());
     if s.layer_exprs.len() > MAX_LAYERS {
@@ -3539,8 +3645,12 @@ fn parse_layers(
                 // Parse actions in the layer and place them appropriately according
                 // to defsrc mapping order.
                 for (i, ac) in layer.iter().skip(2).enumerate() {
+                    let col = s.mapping_order[i];
+                    if let Some(doc) = compute_action_doc(ac, s) {
+                        key_docs.insert((layer_level, col), doc);
+                    }
                     let ac = parse_action(ac, s)?;
-                    layers_cfg[layer_level][0][s.mapping_order[i]] = *ac;
+                    layers_cfg[layer_level][0][col] = *ac;
                 }
             }
             LayerExprs::CustomMapping(layer) => {
@@ -3552,9 +3662,9 @@ fn parse_layers(
                 let mut both_anykey_used = false;
                 for pair in pairs.by_ref() {
                     let input = &pair[0];
-                    let action = &pair[1];
+                    let action_expr = &pair[1];
 
-                    let action = parse_action(action, s)?;
+                    let action = parse_action(action_expr, s)?;
                     if input.atom(s.vars()).is_some_and(|x| x == "_") {
                         if defsrc_anykey_used {
                             bail_expr!(input, "must have only one use of _ within a layer")
@@ -3619,6 +3729,9 @@ fn parse_layers(
                         mapped_keys.insert(input_key);
                         if !layer_mapped_keys.insert(input_key) {
                             bail_expr!(input, "input key must not be repeated within a layer")
+                        }
+                        if let Some(doc) = compute_action_doc(action_expr, s) {
+                            key_docs.insert((layer_level, usize::from(input_key)), doc);
                         }
                         layers_cfg[layer_level][0][usize::from(input_key)] = *action;
                     }

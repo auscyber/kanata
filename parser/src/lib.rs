@@ -8,3 +8,7 @@ pub mod lsp_hints;
 pub mod sequences;
 pub mod subset;
 pub mod trie;
+
+#[cfg(feature = "treesitter")]
+pub mod treesitter;
+

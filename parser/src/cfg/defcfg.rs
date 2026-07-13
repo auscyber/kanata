@@ -872,7 +872,10 @@ pub fn parse_defcfg(expr: &[SExpr]) -> Result<CfgOptions> {
             SExpr::List(_) => {
                 bail_expr!(key, "Lists are not allowed in as keys in defcfg");
             }
-        }
+            SExpr::DocString(_) => {
+                bail_expr!(key, "Docstrings are not allowed as keys in defcfg");
+            }
+    }
     }
 }
 
@@ -910,6 +913,13 @@ fn parse_defcfg_val_bool(expr: &SExpr, label: &str) -> Result<bool> {
                 BOOLEAN_VALUES.join(", "),
             )
         }
+        SExpr::DocString(_) => {
+            bail_expr!(
+                expr,
+                "The value for {label} cannot be a docstring, it must be one of: {}",
+                BOOLEAN_VALUES.join(", "),
+            )
+        }
     }
 }
 
@@ -926,10 +936,10 @@ fn parse_cfg_val_u16(expr: &SExpr, label: &str, exclude_zero: bool) -> Result<u1
                 }
             })
             .ok_or_else(|| anyhow_expr!(expr, "{label} must be {start}-65535"))?),
-        SExpr::List(_) => {
+        _ => {
             bail_expr!(
                 expr,
-                "The value for {label} cannot be a list, it must be a number {start}-65535",
+                "The value for {label} cannot be a {}, it must be a number {start}-65535", expr.r#type()
             )
         }
     }
@@ -980,19 +990,23 @@ pub fn parse_dev(val: &SExpr) -> Result<Vec<String>> {
                             Ok(acc)
                         }
                         SExpr::List(inner_list) => {
-                            bail_span!(inner_list, "expected strings, found a list")
+                            bail_span!(inner_list, "expected strings, found a {}",val.r#type())
+                        },
+                        SExpr::DocString(docstring) => {
+                            bail_span!(docstring, "expected strings, found a {}",val.r#type())
                         }
                     });
 
             r?
         }
+        SExpr::DocString(_) => bail_expr!(val, "expected strings or list, found a docstring"),
     })
 }
 
 fn sexpr_to_str_or_err<'a>(expr: &'a SExpr, label: &str) -> Result<&'a str> {
     match expr {
         SExpr::Atom(a) => Ok(a.t.trim_atom_quotes()),
-        SExpr::List(_) => bail_expr!(expr, "The value for {label} can't be a list"),
+        _ => bail_expr!(expr, "The value for {label} can't be a {}",expr.r#type()),
     }
 }
 
@@ -1002,7 +1016,7 @@ fn sexpr_to_str_or_err<'a>(expr: &'a SExpr, label: &str) -> Result<&'a str> {
 ))]
 fn sexpr_to_list_or_err<'a>(expr: &'a SExpr, label: &str) -> Result<&'a [SExpr]> {
     match expr {
-        SExpr::Atom(_) => bail_expr!(expr, "The value for {label} must be a list"),
+        _ => bail_expr!(expr, "The value for {label} must be a list"),
         SExpr::List(l) => Ok(&l.t),
     }
 }

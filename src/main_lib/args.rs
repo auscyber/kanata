@@ -100,6 +100,14 @@ kanata.kbd in the current working directory and
     #[arg(long, verbatim_doc_comment)]
     pub check: bool,
 
+    /// Parse the configuration, print the keymap as JSON to stdout, and exit.
+    ///
+    /// The output is a key-centric map: for every physical key, the operation
+    /// bound to it on each layer where it is bound. Intended for generating a
+    /// visual map of keybinds without running kanata.
+    #[arg(long, verbatim_doc_comment)]
+    pub export_keymap: bool,
+
     /// Log layer changes even if the configuration file has set the defcfg
     /// option to false. Useful if you are experimenting with a new
     /// configuration but want to default to no logging.

@@ -1,0 +1,228 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/grammar.schema.json",
+  "name": "kanata",
+  "word": "identifier",
+  "rules": {
+    "source_file": {
+      "type": "REPEAT",
+      "content": {
+        "type": "SYMBOL",
+        "name": "list"
+      }
+    },
+    "sexpr": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "number"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "variable"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "alias"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "string"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "identifier"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "list"
+        }
+      ]
+    },
+    "list": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "SYMBOL",
+          "name": "keyword"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SYMBOL",
+            "name": "sexpr"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
+    },
+    "keyword": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "defcfg"
+        },
+        {
+          "type": "STRING",
+          "value": "defsrc"
+        },
+        {
+          "type": "STRING",
+          "value": "deflayer"
+        },
+        {
+          "type": "STRING",
+          "value": "deflayermap"
+        },
+        {
+          "type": "STRING",
+          "value": "defalias"
+        },
+        {
+          "type": "STRING",
+          "value": "defaliasenvcond"
+        },
+        {
+          "type": "STRING",
+          "value": "defvar"
+        },
+        {
+          "type": "STRING",
+          "value": "deftemplate"
+        },
+        {
+          "type": "STRING",
+          "value": "defseq"
+        },
+        {
+          "type": "STRING",
+          "value": "defoverrides"
+        },
+        {
+          "type": "STRING",
+          "value": "deffakekeys"
+        },
+        {
+          "type": "STRING",
+          "value": "defvirtualkeys"
+        },
+        {
+          "type": "STRING",
+          "value": "defchords"
+        },
+        {
+          "type": "STRING",
+          "value": "defzippy"
+        },
+        {
+          "type": "STRING",
+          "value": "defzippy-experimental"
+        },
+        {
+          "type": "STRING",
+          "value": "deflocalkeys-win"
+        },
+        {
+          "type": "STRING",
+          "value": "deflocalkeys-winiov2"
+        },
+        {
+          "type": "STRING",
+          "value": "deflocalkeys-wintercept"
+        },
+        {
+          "type": "STRING",
+          "value": "deflocalkeys-linux"
+        },
+        {
+          "type": "STRING",
+          "value": "deflocalkeys-macos"
+        }
+      ]
+    },
+    "number": {
+      "type": "PATTERN",
+      "value": "-?\\d+(?:\\.\\d+)?"
+    },
+    "variable": {
+      "type": "PATTERN",
+      "value": "\\$[A-Za-z_][A-Za-z0-9_-]*"
+    },
+    "alias": {
+      "type": "PATTERN",
+      "value": "@[A-Za-z_][A-Za-z0-9_-]*"
+    },
+    "identifier": {
+      "type": "PATTERN",
+      "value": "[^()\\s\"]+"
+    },
+    "string": {
+      "type": "PATTERN",
+      "value": "\"([^\"\\\\\\n]|\\\\.)*\""
+    },
+    "line_comment": {
+      "type": "TOKEN",
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": ";;"
+          },
+          {
+            "type": "PATTERN",
+            "value": ".*"
+          }
+        ]
+      }
+    },
+    "block_comment": {
+      "type": "TOKEN",
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "#|"
+          },
+          {
+            "type": "PATTERN",
+            "value": "[\\s\\S]*?"
+          },
+          {
+            "type": "STRING",
+            "value": "|#"
+          }
+        ]
+      }
+    }
+  },
+  "extras": [
+    {
+      "type": "PATTERN",
+      "value": "\\s"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "line_comment"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "block_comment"
+    }
+  ],
+  "conflicts": [],
+  "precedences": [],
+  "externals": [],
+  "inline": [],
+  "supertypes": [],
+  "reserved": {}
+}

@@ -45,7 +45,13 @@ fn lock<T>(lk: &Mutex<T>) -> MutexGuard<'_, T> {
 fn parse_cfg(cfg: &str) -> Result<IntermediateCfg> {
     init_log();
     let _lk = lock(&CFG_PARSE_LOCK);
+
     let mut s = ParserState::default();
+    #[cfg(feature = "treesitter")]
+    crate::treesitter::parse_with_language(cfg).map_err(|e| ParseError {
+        msg: format!("Tree-sitter parse error: {e:?}"),
+        span: None,
+    })?;
     let icfg = parse_cfg_raw_string(
         cfg,
         &mut s,
@@ -304,6 +310,187 @@ fn parse_multiline_comment() {
         "./test_cfgs/multiline_comment.kbd",
     ))
     .unwrap();
+}
+
+#[test]
+fn test_template_examples_expansion() {
+    let _lk = lock(&CFG_PARSE_LOCK);
+    init_log();
+    use crate::lsp_hints::LspHints;
+    use std::fs;
+
+    let content = fs::read_to_string("../cfg_samples/template_examples.kbd").expect("read sample");
+    let mut lsp = LspHints::default();
+    let parsed = parse(&content, "template_examples").expect("sexpr parse");
+    let (expanded, _docs) =
+        crate::cfg::deftemplate::expand_templates(parsed, &mut lsp).expect("expand templates");
+
+    // Helper to check for a top-level list whose first atom matches `name`.
+    let has_list_starting = |name: &str, expected: &[&str]| -> bool {
+        for tl in expanded.iter() {
+            let exprs = &tl.t;
+            if exprs.is_empty() {
+                continue;
+            }
+            if let Some(first) = exprs[0].atom(None) {
+                if first == name {
+                    // collect string forms of remaining atoms for simple matching
+                    let mut remaining: Vec<String> = exprs
+                        .iter()
+                        .skip(1)
+                        .filter_map(|e| match e {
+                            crate::cfg::sexpr::SExpr::Atom(a) => Some(a.t.clone()),
+                            crate::cfg::sexpr::SExpr::List(l) => Some(format!(
+                                "({})",
+                                l.t.iter()
+                                    .filter_map(|x| x.atom(None).map(|s| s.to_string()))
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            )),
+                            _ => None,
+                        })
+                        .collect();
+                    // quick contains check for expected sequence
+                    let mut ok = true;
+                    for &exp in expected {
+                        if !remaining.iter().any(|r| r == exp || r.contains(exp)) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    };
+
+    // Simple substitution: (message "Hello," "Alice" "!")
+    assert!(
+        has_list_starting("message", &["Hello,", "Alice", "!"]),
+        "greet expand"
+    );
+
+    // make-layer -> deflayer numbers (1 2 3 4)
+    assert!(
+        has_list_starting("deflayer", &["numbers", "(1 2 3 4)"]),
+        "make-layer expand"
+    );
+
+    // nested wrapper -> defvar tap-timeout 150 exists
+    assert!(
+        has_list_starting("defvar", &["tap-timeout", "150"]),
+        "nested defvar expand"
+    );
+}
+
+#[test]
+fn sexpr_list_resolves_nested_list() {
+    // Regression: SExpr::list() previously had an unreachable `_ => None` as its
+    // first match arm, so it always returned None and broke all list parsing.
+    let parsed = parse("(a (b c))", "test").expect("sexpr parse");
+    let inner = parsed[0].t[1].list(None).expect("second element is a list");
+    let atoms: Vec<&str> = inner.iter().filter_map(|e| e.atom(None)).collect();
+    assert_eq!(atoms, vec!["b", "c"]);
+}
+
+#[test]
+fn deftemplate_docstring_is_parsed_and_ignored_in_content() {
+    let _lk = lock(&CFG_PARSE_LOCK);
+    init_log();
+    use crate::lsp_hints::LspHints;
+
+    // `#'...'` is a docstring; it may appear right after the variable list of a
+    // deftemplate and must not become part of the expanded content.
+    let content = concat!(
+        "(deftemplate greet (name) #'greets a person by name'\n",
+        "  (message \"Hello\" $name))\n",
+        "(template-expand greet \"Bob\")\n",
+    );
+    let mut lsp = LspHints::default();
+    let parsed = parse(content, "docstring_test").expect("sexpr parse");
+    let (expanded, _docs) =
+        crate::cfg::deftemplate::expand_templates(parsed, &mut lsp).expect("expand templates");
+
+    // The `template-expand` must produce (message "Hello" "Bob"); the docstring is
+    // template metadata and must never appear in expanded template content.
+    let mut found_message = false;
+    for tl in expanded.iter() {
+        let is_deftemplate = tl.t.first().and_then(|e| e.atom(None)) == Some("deftemplate");
+        if tl.t.first().and_then(|e| e.atom(None)) == Some("message") {
+            // Quoted-string atoms keep their quotes until later trimming.
+            let atoms: Vec<&str> = tl.t.iter().skip(1).filter_map(|e| e.atom(None)).collect();
+            assert_eq!(atoms, vec!["\"Hello\"", "\"Bob\""]);
+            found_message = true;
+        }
+        // A docstring may only survive inside the retained `deftemplate` form itself.
+        for e in tl.t.iter() {
+            assert!(
+                is_deftemplate || !matches!(e, crate::cfg::sexpr::SExpr::DocString(_)),
+                "docstring leaked into expanded content outside its deftemplate"
+            );
+        }
+    }
+    assert!(found_message, "expected an expanded (message ...) list");
+}
+
+#[test]
+fn deftemplate_per_parameter_docstrings_parse() {
+    let _lk = lock(&CFG_PARSE_LOCK);
+    init_log();
+    use crate::lsp_hints::LspHints;
+
+    // Each variable may be followed by a docstring documenting it.
+    let content = concat!(
+        "(deftemplate greet (name #'the name to greet' greeting #'the greeting word')\n",
+        "  #'greets a person'\n",
+        "  (message $greeting $name))\n",
+        "(template-expand greet \"Bob\" \"Hello\")\n",
+    );
+    let mut lsp = LspHints::default();
+    let parsed = parse(content, "per_param_docs").expect("sexpr parse");
+    let (expanded, _docs) =
+        crate::cfg::deftemplate::expand_templates(parsed, &mut lsp).expect("expand templates");
+
+    // Expansion still works: the per-parameter docs are metadata, not content.
+    let mut found = false;
+    for tl in expanded.iter() {
+        if tl.t.first().and_then(|e| e.atom(None)) == Some("message") {
+            let atoms: Vec<&str> = tl.t.iter().skip(1).filter_map(|e| e.atom(None)).collect();
+            assert_eq!(atoms, vec!["\"Hello\"", "\"Bob\""]);
+            found = true;
+        }
+    }
+    assert!(found, "expected expanded (message ...) list");
+}
+
+#[test]
+fn deftemplate_dangling_parameter_docstring_errors() {
+    let _lk = lock(&CFG_PARSE_LOCK);
+    init_log();
+    use crate::lsp_hints::LspHints;
+    // A docstring with no preceding variable name is an error.
+    let content = "(deftemplate t (#'no var before me' x) (defvar $x 1))";
+    let mut lsp = LspHints::default();
+    let parsed = parse(content, "dangling").expect("sexpr parse");
+    assert!(crate::cfg::deftemplate::expand_templates(parsed, &mut lsp).is_err());
+}
+
+#[test]
+fn full_parse_of_deftemplate_with_docstring_succeeds() {
+    // End-to-end: a docstring inside a deftemplate must not break the full parser.
+    let _lk = lock(&CFG_PARSE_LOCK);
+    init_log();
+    let source = concat!(
+        "(defsrc a)\n",
+        "(deftemplate lyr (nm k) #'defines a one-key layer'\n",
+        "  (deflayer $nm $k))\n",
+        "(template-expand lyr base b)\n",
+    );
+    new_from_str(source, Default::default())
+        .expect("config with a deftemplate docstring parses");
 }
 
 #[test]
@@ -1605,38 +1792,47 @@ fn parse_defvar_concat() {
     match s.vars().unwrap().get("x").unwrap() {
         SExpr::Atom(a) => assert_eq!(&a.t, "abc"),
         SExpr::List(l) => panic!("expected string not list: {l:?}"),
+        SExpr::DocString(d) => panic!("expected string not docstring: {d:?}"),
     }
     match s.vars().unwrap().get("y").unwrap() {
         SExpr::Atom(a) => assert_eq!(&a.t, "def"),
         SExpr::List(l) => panic!("expected string not list: {l:?}"),
+        SExpr::DocString(d) => panic!("expected string not docstring: {d:?}"),
     }
     match s.vars().unwrap().get("z").unwrap() {
         SExpr::Atom(a) => panic!("expected list not string: {a:?}"),
         SExpr::List(_) => {}
+        SExpr::DocString(d) => panic!("expected list not docstring: {d:?}"),
     }
     match s.vars().unwrap().get("xx").unwrap() {
         SExpr::Atom(a) => assert_eq!(&a.t, "abcdef"),
         SExpr::List(l) => panic!("expected string not list: {l:?}"),
+        SExpr::DocString(d) => panic!("expected string not docstring: {d:?}"),
     }
     match s.vars().unwrap().get("xy").unwrap() {
         SExpr::Atom(a) => assert_eq!(&a.t, "abcdef"),
         SExpr::List(l) => panic!("expected string not list: {l:?}"),
+        SExpr::DocString(d) => panic!("expected string not docstring: {d:?}"),
     }
     match s.vars().unwrap().get("xz").unwrap() {
         SExpr::Atom(a) => panic!("expected list not string {a:?}"),
         SExpr::List(_) => {}
+        SExpr::DocString(d) => panic!("expected list not docstring: {d:?}"),
     }
     match s.vars().unwrap().get("yx").unwrap() {
         SExpr::Atom(a) => assert_eq!(&a.t, "ab c defg hij kl"),
         SExpr::List(l) => panic!("expected string not list: {l:?}"),
+        SExpr::DocString(d) => panic!("expected string not docstring: {d:?}"),
     }
     match s.vars().unwrap().get("yz").unwrap() {
         SExpr::Atom(a) => assert_eq!(&a.t, "abcdefghijkl"),
         SExpr::List(l) => panic!("expected string not list: {l:?}"),
+        SExpr::DocString(d) => panic!("expected string not docstring: {d:?}"),
     }
     match s.vars().unwrap().get("otherpath").unwrap() {
         SExpr::Atom(a) => assert_eq!(&a.t, "/home/myuser/mysubdir/helloworld"),
         SExpr::List(l) => panic!("expected string not list: {l:?}"),
+        SExpr::DocString(d) => panic!("expected string not docstring: {d:?}"),
     }
 }
 

@@ -1,0 +1,195 @@
+[
+  {
+    "type": "keyword",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "list",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "keyword",
+          "named": true
+        },
+        {
+          "type": "sexpr",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "sexpr",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "alias",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "list",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "variable",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "source_file",
+    "named": true,
+    "root": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "list",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "(",
+    "named": false
+  },
+  {
+    "type": ")",
+    "named": false
+  },
+  {
+    "type": "alias",
+    "named": true
+  },
+  {
+    "type": "block_comment",
+    "named": true,
+    "extra": true
+  },
+  {
+    "type": "defalias",
+    "named": false
+  },
+  {
+    "type": "defaliasenvcond",
+    "named": false
+  },
+  {
+    "type": "defcfg",
+    "named": false
+  },
+  {
+    "type": "defchords",
+    "named": false
+  },
+  {
+    "type": "deffakekeys",
+    "named": false
+  },
+  {
+    "type": "deflayer",
+    "named": false
+  },
+  {
+    "type": "deflayermap",
+    "named": false
+  },
+  {
+    "type": "deflocalkeys-linux",
+    "named": false
+  },
+  {
+    "type": "deflocalkeys-macos",
+    "named": false
+  },
+  {
+    "type": "deflocalkeys-win",
+    "named": false
+  },
+  {
+    "type": "deflocalkeys-winiov2",
+    "named": false
+  },
+  {
+    "type": "deflocalkeys-wintercept",
+    "named": false
+  },
+  {
+    "type": "defoverrides",
+    "named": false
+  },
+  {
+    "type": "defseq",
+    "named": false
+  },
+  {
+    "type": "defsrc",
+    "named": false
+  },
+  {
+    "type": "deftemplate",
+    "named": false
+  },
+  {
+    "type": "defvar",
+    "named": false
+  },
+  {
+    "type": "defvirtualkeys",
+    "named": false
+  },
+  {
+    "type": "defzippy",
+    "named": false
+  },
+  {
+    "type": "defzippy-experimental",
+    "named": false
+  },
+  {
+    "type": "identifier",
+    "named": true
+  },
+  {
+    "type": "line_comment",
+    "named": true,
+    "extra": true
+  },
+  {
+    "type": "number",
+    "named": true
+  },
+  {
+    "type": "string",
+    "named": true
+  },
+  {
+    "type": "variable",
+    "named": true
+  }
+]

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "kanata",
+      "camelcase": "Kanata",
+      "title": "Kanata",
+      "scope": "source.kanata",
+      "file-types": [
+        "kbd"
+      ],
+      "injection-regex": "^kanata$",
+      "class-name": "TreeSitterKanata"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "kanata keyboard config grammar",
+    "authors": [
+      {
+        "name": "auscyber",
+        "url": ""
+      }
+    ],
+    "links": {
+      "repository": "https://github.com/tree-sitter/tree-sitter-kanata",
+      "funding": ""
+    }
+  },
+  "bindings": {
+    "c": true,
+    "go": true,
+    "java": false,
+    "node": true,
+    "python": true,
+    "rust": true,
+    "swift": true,
+    "zig": false
+  }
+}

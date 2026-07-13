@@ -143,9 +143,35 @@ impl<T> Spanned<T> {
 pub enum SExpr {
     Atom(Spanned<String>),
     List(Spanned<Vec<SExpr>>),
+    DocString(Spanned<String>),
 }
 
 impl SExpr {
+    /// Returns a human-readable name for this variant (`"atom"`, `"list"`, or
+    /// `"docstring"`), used in error messages.
+    pub fn r#type(&self) -> &str {
+        match self {
+            SExpr::Atom(_) => "atom",
+            SExpr::List(_) => "list",
+            SExpr::DocString(_) => "docstring",
+        }
+    }
+
+    /// If this expression is a docstring, returns its text with the surrounding `#'`/`'`
+    /// delimiters stripped; otherwise `None`.
+    ///
+    /// The `_vars` parameter is currently unused but kept to mirror [`atom`](Self::atom)
+    /// and [`list`](Self::list) so docstrings can later be resolved through variables.
+    pub fn docstring<'a>(&'a self, _vars: Option<&'a HashMap<String, SExpr>>) -> Option<&'a str> {
+        match self {
+            SExpr::DocString(d) => Some(
+                d.t.strip_prefix("#'")
+                    .and_then(|s| s.strip_suffix('\''))
+                    .unwrap_or(d.t.as_str()),
+            ),
+            _ => None,
+        }
+    }
     pub fn atom<'a>(&'a self, vars: Option<&'a HashMap<String, SExpr>>) -> Option<&'a str> {
         match self {
             SExpr::Atom(a) => {
@@ -168,6 +194,9 @@ impl SExpr {
         }
     }
 
+    /// If this expression is a list (or a variable that resolves to a list), returns
+    /// its elements; otherwise `None`. Atoms prefixed with `$` are looked up in `vars`
+    /// and resolved recursively.
     pub fn list<'a>(&'a self, vars: Option<&'a HashMap<String, SExpr>>) -> Option<&'a [SExpr]> {
         match self {
             SExpr::List(l) => Some(&l.t),
@@ -184,6 +213,7 @@ impl SExpr {
                 },
                 _ => None,
             },
+            SExpr::DocString(_) => None,
         }
     }
 
@@ -192,6 +222,7 @@ impl SExpr {
         vars: Option<&'a HashMap<String, SExpr>>,
     ) -> Option<&'a Spanned<Vec<SExpr>>> {
         match self {
+            SExpr::DocString(_) => None,
             SExpr::List(l) => Some(l),
             SExpr::Atom(a) => match (a.t.strip_prefix('$'), vars) {
                 (Some(varname), Some(vars)) => match vars.get(varname) {
@@ -213,6 +244,8 @@ impl SExpr {
         match self {
             SExpr::Atom(a) => a.span.clone(),
             SExpr::List(l) => l.span.clone(),
+            SExpr::DocString(d) => d.span.clone(),
+
         }
     }
 }
@@ -220,6 +253,7 @@ impl SExpr {
 impl std::fmt::Debug for SExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SExpr::DocString(d) => write!(f, "\"#\'{}\'\"", &d.t),
             SExpr::Atom(a) => write!(f, "{}", &a.t),
             SExpr::List(l) => {
                 write!(f, "(")?;
@@ -260,6 +294,7 @@ enum Token {
     Close,
     StringTok,
     BlockComment,
+    DocString,
     LineComment,
     Whitespace,
 }
@@ -366,6 +401,22 @@ impl<'a> Lexer<'a> {
         Err("Unterminated multiline string. Add \"# after the end of your string.".to_string())
     }
 
+    /// Looks for the closing `'`, consuming bytes until found. If not found, returns Err(...).
+    fn read_until_docstring_end(&mut self) -> TokenRes {
+        for b2 in self.bytes.clone().skip(1) {
+            // Advance the real iterator in lockstep with the 1-item-ahead clone.
+            // Iterating over a clone that's 1 item ahead - this is guaranteed to be Some.
+            self.bytes.next().expect("iter lag");
+            if b2 == b'\'' {
+                self.bytes.next();
+                return Ok(Token::DocString);
+            }
+        }
+        Err("Unterminated docstring. Add ' after the end of your docstring.".to_string())
+    }
+
+
+
     /// Looks for "|#", consuming bytes until found. If not found, returns Err(...);
     fn read_until_multiline_comment_end(&mut self) -> TokenRes {
         for b2 in self.bytes.clone().skip(1) {
@@ -435,6 +486,15 @@ impl<'a> Lexer<'a> {
                                 if self.ignore_whitespace_and_comments {
                                     continue;
                                 }
+                                tok
+                            }
+                            Some(b'\'') => {
+                                // consume the opening '
+                                self.bytes.next();
+                                let tok: Token = match self.read_until_docstring_end() {
+                                    Ok(t) => t,
+                                    e @ Err(_) => return Some((start, e)),
+                                };
                                 tok
                             }
                             _ => self.next_string(),
@@ -530,6 +590,11 @@ fn parse_with(
                     let expr = SExpr::List(Spanned::new(exprs, stack_span.cover(&span)));
                     stack.last_mut().expect("not empty").t.push(expr);
                 }
+                DocString=> stack
+                    .last_mut()
+                    .expect("not empty")
+                    .t
+                    .push(SExpr::DocString(Spanned::new(s[span.clone()].to_string(), span))),
                 StringTok => stack
                     .last_mut()
                     .expect("not empty")
@@ -560,6 +625,8 @@ fn parse_with(
         .into_iter()
         .map(|expr| match expr {
             SExpr::List(es) => Ok(es),
+
+            SExpr::DocString(d) => Err(ParseError::new(d.span, "Everything must be in a list")),
             SExpr::Atom(s) => Err(ParseError::new(s.span, "Everything must be in a list")),
         })
         .collect::<Result<_>>()?;

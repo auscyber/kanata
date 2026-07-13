@@ -60,11 +60,17 @@ mod cli {
             vec![]
         };
 
-        let log_lvl = match (args.debug, args.trace, args.quiet) {
-            (_, true, false) => LevelFilter::Trace,
-            (true, false, false) => LevelFilter::Debug,
-            (false, false, false) => LevelFilter::Info,
-            (_, _, true) => LevelFilter::Error,
+        let log_lvl = if args.export_keymap {
+            // Keep stdout clean for the machine-readable keymap JSON; only errors
+            // (which go to stderr) should be logged.
+            LevelFilter::Error
+        } else {
+            match (args.debug, args.trace, args.quiet) {
+                (_, true, false) => LevelFilter::Trace,
+                (true, false, false) => LevelFilter::Debug,
+                (false, false, false) => LevelFilter::Info,
+                (_, _, true) => LevelFilter::Error,
+            }
         };
 
         let mut log_cfg = ConfigBuilder::new();
@@ -120,6 +126,31 @@ mod cli {
                         log::error!("{e:?}");
                         1
                     }
+                }
+            };
+            std::process::exit(status);
+        }
+
+        if args.export_keymap {
+            let parsed = if let Some(ref cfg_str) = config_string {
+                use rustc_hash::FxHashMap;
+                cfg::new_from_str(cfg_str, FxHashMap::default())
+            } else {
+                cfg::new_from_file(&cfg_paths[0])
+            };
+            let status = match parsed {
+                Ok(cfg) => {
+                    let keymap = kanata_state_machine::keymap::build_keymap(
+                        &cfg.layout,
+                        &cfg.layer_info,
+                        &cfg.key_docs,
+                    );
+                    println!("{}", kanata_state_machine::keymap::keymap_to_json(&keymap));
+                    0
+                }
+                Err(e) => {
+                    log::error!("{e:?}");
+                    1
                 }
             };
             std::process::exit(status);

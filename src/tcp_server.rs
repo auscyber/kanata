@@ -156,6 +156,23 @@ impl TcpServer {
                                                     ),
                                                 }
                                             }
+                                            ClientMessage::RequestKeymap {} => {
+                                                let msg = {
+                                                    let k = kanata.lock();
+                                                    let keymap = crate::keymap::build_keymap(
+                                                        &k.layout,
+                                                        &k.layer_info,
+                                                        &k.key_docs,
+                                                    );
+                                                    ServerMessage::Keymap { keymap }
+                                                };
+                                                match stream.write_all(&msg.as_bytes()) {
+                                                    Ok(_) => {}
+                                                    Err(err) => log::error!(
+                                                        "server could not send response: {err}"
+                                                    ),
+                                                }
+                                            }
                                             ClientMessage::ActOnFakeKey { name, action } => {
                                                 let mut k = kanata.lock();
                                                 let index = match k.virtual_keys.get(&name) {

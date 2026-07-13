@@ -8,7 +8,9 @@ fn set_virtual_key_reference_lsp_hint(vk_name_expr: &SExpr, s: &ParserState) {
     {
         let atom = match vk_name_expr {
             SExpr::Atom(x) => x,
-            SExpr::List(_) => unreachable!("should be validated to be atom earlier"),
+            SExpr::List(_) | SExpr::DocString(_) => {
+                unreachable!("should be validated to be atom earlier")
+            }
         };
         s.lsp_hints
             .borrow_mut()

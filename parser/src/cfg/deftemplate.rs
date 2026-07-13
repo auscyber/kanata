@@ -28,10 +28,60 @@ use super::*;
 #[derive(Debug)]
 struct Template {
     name: String,
+    documentation: Option<String>,
+    // Span of the whole `deftemplate` form. Expanded content keeps the spans of the template
+    // body, so an action whose span falls within this range originated from this template.
+    def_span: Span,
     vars: Vec<String>,
+    // Per-variable documentation, parallel to `vars`. A variable's doc is the docstring
+    // written immediately after the variable name in the variable list.
+    var_docs: Vec<Option<String>>,
     // Same as vars above but all names are prefixed with '$'.
     vars_substitute_names: Vec<String>,
     content: Vec<SExpr>,
+}
+
+/// User-facing documentation for a single `deftemplate`, extracted at parse time so it can be
+/// surfaced to external tooling (the TCP API and the `--export-template-docs` CLI flag).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateDoc {
+    /// The template name, i.e. the first parameter of `deftemplate`.
+    pub name: String,
+    /// The docstring written after the template's variable list, if any.
+    pub documentation: Option<String>,
+    /// The template's variables in declaration order, each with its optional docstring.
+    pub variables: Vec<TemplateVarDoc>,
+    /// Span of the whole `deftemplate` form, used to attribute expanded actions back to this
+    /// template (their spans point into the template body).
+    pub def_span: Span,
+}
+
+/// Documentation for a single `deftemplate` variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateVarDoc {
+    /// The variable name as written in the variable list (without the `$` substitution prefix).
+    pub name: String,
+    /// The docstring written immediately after the variable name, if any.
+    pub documentation: Option<String>,
+}
+
+impl Template {
+    fn to_doc(&self) -> TemplateDoc {
+        TemplateDoc {
+            name: self.name.clone(),
+            documentation: self.documentation.clone(),
+            variables: self
+                .vars
+                .iter()
+                .zip(self.var_docs.iter())
+                .map(|(name, doc)| TemplateVarDoc {
+                    name: name.clone(),
+                    documentation: doc.clone(),
+                })
+                .collect(),
+            def_span: self.def_span.clone(),
+        }
+    }
 }
 
 /// Parse `deftemplate`s and expand `template-expand`s.
@@ -46,7 +96,7 @@ struct Template {
 pub fn expand_templates(
     mut toplevel_exprs: Vec<TopLevel>,
     lsp_hints: &mut LspHints,
-) -> Result<Vec<TopLevel>> {
+) -> Result<(Vec<TopLevel>, Vec<TemplateDoc>)> {
     let mut templates: Vec<Template> = vec![];
 
     // Find defined templates
@@ -57,6 +107,8 @@ pub fn expand_templates(
         ) {
             continue;
         }
+
+        let def_span = list.span.clone();
 
         // Parse template name
         let (name, _name_span) = list
@@ -79,14 +131,16 @@ pub fn expand_templates(
                 Ok((name, name_expr.span()))
             })?;
 
+
         #[cfg(feature = "lsp")]
         lsp_hints
             .definition_locations
             .template
             .insert(name.to_owned(), _name_span);
 
-        // Parse template variable names
-        let vars = list
+        // Parse template variable names, optionally each followed by a docstring
+        // documenting that variable, e.g. `(name #'the name' greeting #'the word')`.
+        let (vars, var_docs) = list
             .t
             .get(2)
             .ok_or_else(|| {
@@ -104,18 +158,49 @@ pub fn expand_templates(
                 })
             })
             .and_then(|v| {
-                v.iter().try_fold(vec![], |mut vars, var| {
-                    let s = var.atom(None).map(|a| a.to_owned()).ok_or_else(|| {
-                        anyhow_expr!(var, "deftemplate variables must be strings")
-                    })?;
-                    vars.push(s);
-                    Ok(vars)
-                })
+                let mut vars: Vec<String> = vec![];
+                let mut var_docs: Vec<Option<String>> = vec![];
+                for elem in v.iter() {
+                    match elem {
+                        SExpr::Atom(a) => {
+                            vars.push(a.t.clone());
+                            var_docs.push(None);
+                        }
+                        SExpr::DocString(_) => {
+                            let doc = elem.docstring(None).unwrap_or_default().to_string();
+                            match var_docs.last_mut() {
+                                Some(slot) if slot.is_none() => *slot = Some(doc),
+                                Some(_) => {
+                                    return Err(anyhow_expr!(
+                                        elem,
+                                        "this template variable already has a docstring"
+                                    ));
+                                }
+                                None => {
+                                    return Err(anyhow_expr!(
+                                        elem,
+                                        "a docstring must come right after the variable name it documents"
+                                    ));
+                                }
+                            }
+                        }
+                        SExpr::List(_) => {
+                            return Err(anyhow_expr!(elem, "deftemplate variables must be strings"));
+                        }
+                    }
+                }
+                Ok((vars, var_docs))
             })?;
+        let doc = list
+            .t
+            .get(3)
+            .and_then(|doc_expr| {
+            doc_expr.docstring(None).map(|doc| (doc, doc_expr.span()))
+            });
         let vars_substitute_names: Vec<_> = vars.iter().map(|v| format!("${v}")).collect();
 
         // Validate content of template
-        let content: Vec<SExpr> = list.t.iter().skip(3).cloned().collect();
+        let content: Vec<SExpr> = list.t.iter().skip(if doc.is_some() { 4} else { 3}).cloned().collect();
         let mut var_usage_counts: HashMap<String, u32> = vars_substitute_names
             .iter()
             .map(|v| (v.clone(), 0))
@@ -168,7 +253,10 @@ pub fn expand_templates(
 
         templates.push(Template {
             name: name.to_string(),
+            documentation: doc.map(|(d, _)| d.to_string()),
+            def_span,
             vars,
+            var_docs,
             vars_substitute_names,
             content,
         });
@@ -186,11 +274,19 @@ pub fn expand_templates(
         .collect();
     expand(&mut toplevels, &templates, lsp_hints)?;
 
-    toplevels.into_iter().try_fold(vec![], |mut tls, tl| {
+    // Collect user-facing documentation before consuming `templates`, so it can be surfaced
+    // to external tooling even though the templates themselves are expanded away.
+    let template_docs: Vec<TemplateDoc> = templates.iter().map(Template::to_doc).collect();
+
+    let expanded = toplevels.into_iter().try_fold(vec![], |mut tls, tl| {
         tls.push(match &tl {
             SExpr::Atom(_) => bail_expr!(
                 &tl,
                 "expansion created a string outside any list which is not allowed"
+            ),
+            SExpr::DocString(_) => bail_expr!(
+                &tl,
+                "expansion created a docstring outside any list which is not allowed"
             ),
             SExpr::List(l) => Spanned {
                 t: l.t.clone(),
@@ -198,7 +294,8 @@ pub fn expand_templates(
             },
         });
         Ok(tls)
-    })
+    })?;
+    Ok((expanded, template_docs))
 }
 
 struct Replacement {
@@ -211,7 +308,7 @@ fn expand(exprs: &mut Vec<SExpr>, templates: &[Template], _lsp_hints: &mut LspHi
     loop {
         for (expr_index, expr) in exprs.iter_mut().enumerate() {
             match expr {
-                SExpr::Atom(_) => continue,
+                SExpr::Atom(_) | SExpr::DocString(_) => continue,
                 SExpr::List(l) => {
                     if !matches!(
                         l.t.first().and_then(|expr| expr.atom(None)),
@@ -266,7 +363,7 @@ fn expand(exprs: &mut Vec<SExpr>, templates: &[Template], _lsp_hints: &mut LspHi
                     visit_mut_all_atoms(&mut expanded_template, &mut |expr: &mut SExpr| {
                         *expr = match expr {
                             // Below should not be reached because only atoms should be visited
-                            SExpr::List(_) => unreachable!(),
+                            SExpr::List(_) | SExpr::DocString(_) => unreachable!(),
                             SExpr::Atom(a) => {
                                 match template
                                     .vars_substitute_names
@@ -288,11 +385,11 @@ fn expand(exprs: &mut Vec<SExpr>, templates: &[Template], _lsp_hints: &mut LspHi
                     visit_mut_all_lists(&mut expanded_template, &mut |expr: &mut SExpr| {
                         *expr = match expr {
                             // Below should not be reached because only lists should be visited
-                            SExpr::Atom(_) => unreachable!(),
+                            SExpr::Atom(_) | SExpr::DocString(_) => unreachable!(),
                             SExpr::List(l) => parse_list_var(l, &HashMap::default()),
                         };
                         match expr {
-                            SExpr::Atom(_) => true,
+                            SExpr::Atom(_) | SExpr::DocString(_) => true,
                             SExpr::List(_) => false,
                         }
                     });
@@ -339,6 +436,7 @@ fn visit_validate_all_atoms(
     for expr in exprs {
         match expr {
             SExpr::Atom(a) => visit(a)?,
+            SExpr::DocString(_) => {}
             SExpr::List(l) => visit_validate_all_atoms(&l.t, visit)?,
         }
     }
@@ -353,6 +451,7 @@ fn visit_validate_all_atoms_peek_next(
     for (i, expr) in exprs.iter().enumerate() {
         match expr {
             SExpr::Atom(a) => visit(a, exprs.get(i + 1))?,
+            SExpr::DocString(_) => {}
             SExpr::List(l) => visit_validate_all_atoms_peek_next(&l.t, visit)?,
         }
     }
@@ -363,6 +462,7 @@ fn visit_mut_all_atoms(exprs: &mut [SExpr], visit: &mut dyn FnMut(&mut SExpr)) {
     for expr in exprs {
         match expr {
             SExpr::Atom(_) => visit(expr),
+            SExpr::DocString(_) => {}
             SExpr::List(l) => visit_mut_all_atoms(&mut l.t, visit),
         }
     }
@@ -371,7 +471,7 @@ fn visit_mut_all_atoms(exprs: &mut [SExpr], visit: &mut dyn FnMut(&mut SExpr)) {
 fn visit_mut_all_lists(exprs: &mut [SExpr], visit: &mut dyn FnMut(&mut SExpr) -> ChangeOccurred) {
     for expr in exprs {
         loop {
-            if let SExpr::Atom(_) = expr {
+            if matches!(expr, SExpr::Atom(_) | SExpr::DocString(_)) {
                 break;
             }
             // revisit until change did not happen to the list
@@ -391,7 +491,7 @@ fn evaluate_conditionals(exprs: &mut Vec<SExpr>) -> Result<ChangeOccurred> {
     let mut replacements: Vec<Replacement> = vec![];
     let mut expand_happened = false;
     for (index, expr) in exprs.iter_mut().enumerate() {
-        if matches!(expr, SExpr::Atom(_)) {
+        if matches!(expr, SExpr::Atom(_) | SExpr::DocString(_)) {
             continue;
         }
         // expr must be a list, visit it
@@ -417,7 +517,7 @@ fn evaluate_conditionals(exprs: &mut Vec<SExpr>) -> Result<ChangeOccurred> {
             })
         } else {
             expand_happened |= match expr {
-                SExpr::Atom(_) => unreachable!(),
+                SExpr::Atom(_) | SExpr::DocString(_) => unreachable!(),
                 SExpr::List(l) => evaluate_conditionals(&mut l.t)?,
             };
         }
@@ -460,7 +560,7 @@ fn if_not_in_list_replacement(expr: &SExpr) -> Result<Option<Vec<SExpr>>> {
 fn strings_compare_replacement(expr: &SExpr, operation: &str) -> Result<Option<Vec<SExpr>>> {
     match expr {
         // Below should not be reached because only lists should be visited
-        SExpr::Atom(_) => unreachable!(),
+        SExpr::Atom(_) | SExpr::DocString(_) => unreachable!(),
         SExpr::List(l) => Ok(match l.t.first() {
             Some(SExpr::Atom(Spanned { t, .. })) if t.as_str() == operation => {
                 let first =
@@ -507,7 +607,7 @@ fn strings_compare_replacement(expr: &SExpr, operation: &str) -> Result<Option<V
 fn string_list_compare_replacement(expr: &SExpr, operation: &str) -> Result<Option<Vec<SExpr>>> {
     match expr {
         // Below should not be reached because only lists should be visited
-        SExpr::Atom(_) => unreachable!(),
+        SExpr::Atom(_) | SExpr::DocString(_) => unreachable!(),
         SExpr::List(l) => Ok(match l.t.first() {
             Some(SExpr::Atom(Spanned { t, .. })) if t.as_str() == operation => {
                 let first =

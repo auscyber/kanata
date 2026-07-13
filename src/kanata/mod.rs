@@ -109,6 +109,9 @@ pub struct Kanata {
     pub prev_keys: Vec<KeyCode>,
     /// Used for printing layer info to the info log when changing layers.
     pub layer_info: Vec<LayerInfo>,
+    /// Authored documentation for key positions, keyed by `(layer_index, key_column)`. Sourced
+    /// from `defalias`/`deftemplate` docstrings and surfaced in the keymap sent over TCP.
+    pub key_docs: KeyDocs,
     /// Used to track when a layer change occurs.
     pub prev_layer: usize,
     /// Vertical scrolling state tracker. Is Some(...) when a vertical scrolling action is active
@@ -393,6 +396,7 @@ impl Kanata {
             key_outputs: cfg.key_outputs,
             layout: cfg.layout,
             layer_info: cfg.layer_info,
+            key_docs: cfg.key_docs,
             cur_keys: Vec::new(),
             prev_keys: Vec::new(),
             prev_layer: 0,
@@ -539,6 +543,7 @@ impl Kanata {
             key_outputs: cfg.key_outputs,
             layout: cfg.layout,
             layer_info: cfg.layer_info,
+            key_docs: cfg.key_docs,
             cur_keys: Vec::new(),
             prev_keys: Vec::new(),
             prev_layer: 0,
@@ -667,6 +672,7 @@ impl Kanata {
         self.layout = cfg.layout;
         self.key_outputs = cfg.key_outputs;
         self.layer_info = cfg.layer_info;
+        self.key_docs = cfg.key_docs;
         self.sequences = cfg.sequences;
         self.overrides = cfg.overrides;
         self.log_layer_changes =
